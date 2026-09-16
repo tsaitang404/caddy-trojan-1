@@ -148,20 +148,6 @@ func (l *Listener) Close() error {
 	return nil
 }
 
-// getRawConn extracts the underlying raw TCP connection from a tls.Conn.
-// When the listener is behind TLS (Caddy auto-prepends tlsPlaceholderWrapper),
-// we need to read raw TCP bytes to detect the trojan prefix without triggering
-// the TLS handshake which would consume the ClientHello.
-func getRawConn(c net.Conn) net.Conn {
-	type rawConn interface {
-		NetConn() net.Conn
-	}
-	if rc, ok := c.(rawConn); ok {
-		return rc.NetConn()
-	}
-	return c
-}
-
 func (l *Listener) loop() {
 	for {
 		conn, err := l.Listener.Accept()
@@ -176,16 +162,9 @@ func (l *Listener) loop() {
 		}
 
 		go func(c net.Conn, lg *zap.Logger, up app.Upstream) {
-			// FIX: Extract raw TCP connection to read prefix bytes without
-			// triggering TLS handshake. Caddy v2 auto-prepends tlsPlaceholderWrapper
-			// which forces this plugin after TLS. Without this fix, c.Read()
-			// on *tls.Conn triggers the handshake and consumes the ClientHello,
-			// then RewindConn can't restore it → TLS fails → FD leak.
-			raw := getRawConn(c)
-
 			b := make([]byte, trojan.HeaderLen+2)
 			for n := 0; n < trojan.HeaderLen+2; n += 1 {
-				nr, err := raw.Read(b[n : n+1])
+				nr, err := c.Read(b[n : n+1])
 				if err != nil {
 					if errors.Is(err, io.EOF) {
 						lg.Error(fmt.Sprintf("read prefix error: read tcp %v -> %v: read: %v", c.RemoteAddr(), c.LocalAddr(), err))
