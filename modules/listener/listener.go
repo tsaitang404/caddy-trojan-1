@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -170,7 +171,7 @@ func (l *Listener) loop() {
 						lg.Error(fmt.Sprintf("read prefix error: read tcp %v -> %v: read: %v", c.RemoteAddr(), c.LocalAddr(), err))
 					} else {
 						lg.Error(fmt.Sprintf("read prefix error, not io, rewind and let normal caddy deal with it: %v", err))
-						l.conns <- rawconn.RewindConn(c, b[:n+1])
+						l.sendOrClose(c, rawconn.RewindConn(c, b[:n+1]))
 						return
 					}
 					c.Close()
@@ -185,7 +186,7 @@ func (l *Listener) loop() {
 					case <-l.closed:
 						c.Close()
 					default:
-						l.conns <- rawconn.RewindConn(c, b[:n+1])
+						l.sendOrClose(c, rawconn.RewindConn(c, b[:n+1]))
 					}
 					return
 				}
@@ -197,7 +198,7 @@ func (l *Listener) loop() {
 				case <-l.closed:
 					c.Close()
 				default:
-					l.conns <- rawconn.RewindConn(c, b)
+					l.sendOrClose(c, rawconn.RewindConn(c, b))
 				}
 				return
 			}
@@ -212,5 +213,25 @@ func (l *Listener) loop() {
 			}
 			up.Consume(x.ByteSliceToString(b[:trojan.HeaderLen]), nr, nw)
 		}(conn, l.Logger, l.Upstream)
+	}
+}
+
+// sendOrClose attempts to send conn to the conns channel with a timeout.
+// If the channel is full (Caddy HTTP server not consuming), the connection
+// is closed to prevent goroutine leak and FD leak.
+// This fixes a critical bug where thousands of goroutines would block on
+// chan send when Caddy's TLS handshake fails (e.g. no certificate for the
+// requested SNI), holding open TCP sockets indefinitely.
+func (l *Listener) sendOrClose(original net.Conn, conn net.Conn) {
+	select {
+	case l.conns <- conn:
+		// sent successfully
+	case <-time.After(5 * time.Second):
+		// channel full — Caddy is not consuming
+		// close the connection to release the FD
+		l.Logger.Warn(fmt.Sprintf("conns channel full, dropping connection from %v", original.RemoteAddr()))
+		conn.Close()
+	case <-l.closed:
+		conn.Close()
 	}
 }
