@@ -146,7 +146,11 @@ func (l *Listener) Close() error {
 	default:
 		close(l.closed)
 	}
-	return nil
+	// Close the underlying listener to stop loop() goroutine.
+	// Without this, each systemctl reload creates a new socket while
+	// the old one stays alive (loop() still blocked on Accept), causing
+	// socket accumulation and TLS handshake race conditions.
+	return l.Listener.Close()
 }
 
 func (l *Listener) loop() {
